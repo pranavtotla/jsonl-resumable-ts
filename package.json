@@ -1,0 +1,51 @@
+{
+  "name": "jsonl-resumable",
+  "version": "0.5.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "O(1) random access and resumable iteration for JSONL files",
+  "keywords": ["jsonl", "index", "random-access", "resume", "async-iterator"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pranavtotla/jsonl-resumable-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pranavtotla/jsonl-resumable-js/issues"
+  },
+  "homepage": "https://github.com/pranavtotla/jsonl-resumable-js#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "exports": {
+    "./node": {
+      "import": "./dist/node/index.js",
+      "types": "./dist/node/index.d.ts"
+    },
+    "./browser": {
+      "import": "./dist/browser/index.js",
+      "types": "./dist/browser/index.d.ts"
+    }
+  },
+  "bin": {
+    "jsonl-index": "./dist/node/cli.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "lint": "biome check .",
+    "format": "biome format . --write",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.10",
+    "@vitest/coverage-v8": "^1.2.2",
+    "@biomejs/biome": "^1.5.3",
+    "playwright": "^1.41.2",
+    "tsup": "^8.0.1",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.2"
+  },
+  "dependencies": {}
+}
