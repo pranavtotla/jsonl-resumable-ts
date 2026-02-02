@@ -36,16 +36,48 @@ const replaceSuffix = (filePath: string, suffix: string): string => {
   return path.join(parsed.dir, `${parsed.name}${suffix}`);
 };
 
+/**
+ * Options for creating a JsonlIndex instance.
+ */
 type JsonlIndexOptions = {
+  /** Interval at which checkpoints are stored (default: 100) */
   checkpointInterval?: number;
+  /** Custom path for the index file (default: {filePath}.idx) */
   indexPath?: string;
+  /** Whether to automatically save the index after building (default: true) */
   autoSave?: boolean;
+  /** Custom storage adapter for index persistence */
   storage?: IndexStorage;
   // Internal-only for fromJSON
   __preloaded?: { meta: IndexMeta; lines: LineInfo[] };
   __filePathOverride?: string;
 };
 
+/**
+ * O(1) random access and resumable iteration for JSONL files.
+ *
+ * Creates a byte-offset index that enables instant seeking to any line
+ * without scanning the entire file.
+ *
+ * @example
+ * ```typescript
+ * import { JsonlIndex } from 'jsonl-resumable/node';
+ *
+ * // Create index (automatically builds and persists to .idx file)
+ * const index = new JsonlIndex('./data.jsonl');
+ *
+ * // O(1) random access
+ * const record = await index.readJson<MyType>(1000000);
+ *
+ * // Iterate from any position
+ * for await (const line of index.asyncIter({ start: 500 })) {
+ *   console.log(line);
+ * }
+ *
+ * // Random sampling
+ * const sample = await index.sample<MyType>(100, { seed: 42 });
+ * ```
+ */
 export class JsonlIndex {
   private readonly storage: IndexStorage;
   private readonly progressFallback: ProgressStorage;
@@ -58,6 +90,16 @@ export class JsonlIndex {
   private meta: IndexMeta | null = null;
   private lines: LineInfo[] = [];
 
+  /**
+   * Creates a new JsonlIndex for the specified file.
+   *
+   * The index is built synchronously for FileStorage (default) and MemoryStorage,
+   * or asynchronously for custom storage adapters.
+   *
+   * @param filePath - Path to the JSONL file
+   * @param options - Configuration options
+   * @throws Error if the JSONL file does not exist
+   */
   constructor(filePath: string, options: JsonlIndexOptions = {}) {
     const resolvedPath = options.__filePathOverride
       ? path.resolve(options.__filePathOverride)
@@ -86,6 +128,13 @@ export class JsonlIndex {
     }
   }
 
+  /**
+   * Creates a JsonlIndex from serialized JSON data.
+   *
+   * @param data - Serialized index data from toJSON()
+   * @param file - File source (must have filePath or use meta.filePath)
+   * @returns A new JsonlIndex instance with the loaded index
+   */
   static fromJSON(
     data: { meta: IndexMeta; lines: [number, number][] },
     file: FileSource,
@@ -282,26 +331,32 @@ export class JsonlIndex {
     });
   }
 
+  /** Total number of lines in the indexed file. */
   get totalLines(): number {
     return this.meta?.totalLines ?? 0;
   }
 
+  /** Size of the indexed file in bytes. */
   get fileSize(): number {
     return this.meta?.fileSize ?? 0;
   }
 
+  /** Absolute path to the JSONL file. */
   get filePath(): string {
     return this.filePathValue;
   }
 
+  /** Path to the progress file for batch processing. */
   get progressPath(): string {
     return replaceSuffix(this.filePathValue, ".progress");
   }
 
+  /** Key used for progress storage. */
   get progressKey(): string {
     return this.progressPath;
   }
 
+  /** Storage adapter for batch processing progress. */
   get progressStorage(): ProgressStorage {
     if (typeof (this.storage as unknown as ProgressStorage).saveJob === "function") {
       return this.storage as unknown as ProgressStorage;
@@ -309,11 +364,22 @@ export class JsonlIndex {
     return this.progressFallback;
   }
 
+  /**
+   * Gets current file stats (size and modification time).
+   * @returns Object with size in bytes and mtime as Unix timestamp
+   */
   async getStats(): Promise<{ size: number; mtime: number }> {
     const stats = await fsPromises.stat(this.filePathValue);
     return { size: stats.size, mtime: stats.mtimeMs / 1000 };
   }
 
+  /**
+   * Gets the byte offset and length for a specific line.
+   *
+   * @param lineNumber - Zero-indexed line number
+   * @returns Object with byte offset and length
+   * @throws IndexOutOfBoundsError if line number is out of range
+   */
   getOffset(lineNumber: number): { offset: number; length: number } {
     if (lineNumber < 0 || lineNumber >= this.lines.length) {
       throw new IndexOutOfBoundsError(lineNumber, this.lines.length);
@@ -322,6 +388,13 @@ export class JsonlIndex {
     return { offset: info.offset, length: info.length };
   }
 
+  /**
+   * Reads a single line as a string (O(1) operation).
+   *
+   * @param lineNumber - Zero-indexed line number
+   * @returns The line content without trailing newline
+   * @throws IndexOutOfBoundsError if line number is out of range
+   */
   async readLine(lineNumber: number): Promise<string> {
     await this.ready();
     const { offset, length } = this.getOffset(lineNumber);
@@ -335,11 +408,27 @@ export class JsonlIndex {
     }
   }
 
+  /**
+   * Reads a single line and parses it as JSON (O(1) operation).
+   *
+   * @typeParam T - Expected type of the parsed JSON
+   * @param lineNumber - Zero-indexed line number
+   * @returns Parsed JSON object
+   * @throws IndexOutOfBoundsError if line number is out of range
+   * @throws SyntaxError if JSON parsing fails
+   */
   async readJson<T = unknown>(lineNumber: number): Promise<T> {
     const line = await this.readLine(lineNumber);
     return JSON.parse(line) as T;
   }
 
+  /**
+   * Reads multiple lines as strings.
+   *
+   * @param lineNumbers - Array of zero-indexed line numbers
+   * @returns Array of line contents in the same order
+   * @throws IndexOutOfBoundsError if any line number is out of range
+   */
   async readLineMany(lineNumbers: number[]): Promise<string[]> {
     await this.ready();
     if (lineNumbers.length === 0) {
@@ -367,11 +456,26 @@ export class JsonlIndex {
     }
   }
 
+  /**
+   * Reads multiple lines and parses them as JSON.
+   *
+   * @typeParam T - Expected type of the parsed JSON
+   * @param lineNumbers - Array of zero-indexed line numbers
+   * @returns Array of parsed JSON objects in the same order
+   * @throws IndexOutOfBoundsError if any line number is out of range
+   */
   async readJsonMany<T = unknown>(lineNumbers: number[]): Promise<T[]> {
     const lines = await this.readLineMany(lineNumbers);
     return lines.map((line) => JSON.parse(line) as T);
   }
 
+  /**
+   * Synchronously iterates over lines starting from a position.
+   *
+   * @param startLine - Starting line number (default: 0)
+   * @yields Lines as strings without trailing newlines
+   * @throws Error if index is not ready (async initialization)
+   */
   *iterFrom(startLine = 0): Generator<string> {
     const effectiveStart = Math.max(startLine, 0);
     if (effectiveStart >= this.lines.length) {
@@ -395,12 +499,26 @@ export class JsonlIndex {
     }
   }
 
+  /**
+   * Synchronously iterates over lines as parsed JSON.
+   *
+   * @typeParam T - Expected type of the parsed JSON
+   * @param startLine - Starting line number (default: 0)
+   * @yields Parsed JSON objects
+   * @throws Error if index is not ready (async initialization)
+   */
   *iterJsonFrom<T = unknown>(startLine = 0): Generator<T> {
     for (const line of this.iterFrom(startLine)) {
       yield JSON.parse(line) as T;
     }
   }
 
+  /**
+   * Asynchronously iterates over lines with configurable options.
+   *
+   * @param options - Iteration options (start, skip, limit, batchSize)
+   * @yields Lines as strings without trailing newlines
+   */
   async *asyncIter(options: IterOptions = {}): AsyncGenerator<string> {
     await this.ready();
     const startLine = options.start ?? 0;
@@ -444,6 +562,13 @@ export class JsonlIndex {
     }
   }
 
+  /**
+   * Asynchronously iterates over lines as parsed JSON.
+   *
+   * @typeParam T - Expected type of the parsed JSON
+   * @param options - Iteration options including onDecodeError behavior
+   * @yields Parsed JSON objects (or raw strings if onDecodeError is 'raw')
+   */
   async *asyncIterJson<T = unknown>(options: JsonIterOptions = {}): AsyncGenerator<T> {
     const onDecodeError = options.onDecodeError ?? "raise";
     for await (const line of this.asyncIter(options)) {
@@ -460,6 +585,12 @@ export class JsonlIndex {
     }
   }
 
+  /**
+   * Asynchronously iterates over raw line bytes.
+   *
+   * @param options - Iteration options (start, skip, limit, batchSize)
+   * @yields Raw line data as Uint8Array (including newlines)
+   */
   async *asyncIterRaw(options: IterOptions = {}): AsyncGenerator<Uint8Array> {
     await this.ready();
     const startLine = options.start ?? 0;
@@ -503,14 +634,34 @@ export class JsonlIndex {
     }
   }
 
+  /**
+   * Creates a Web ReadableStream from the index.
+   *
+   * @param options - Iteration options (start, skip, limit, batchSize)
+   * @returns Web ReadableStream of line strings
+   */
   toWebStream(options: IterOptions = {}): ReadableStream<string> {
     return toWebStream(this.asyncIter(options));
   }
 
+  /**
+   * Creates a Node.js Readable stream from the index.
+   *
+   * @param options - Iteration options (start, skip, limit, batchSize)
+   * @returns Node.js Readable stream of line strings
+   */
   toNodeStream(options: IterOptions = {}): NodeJS.ReadableStream {
     return toNodeStream(this.asyncIter(options));
   }
 
+  /**
+   * Returns a random sample of records from the file.
+   *
+   * @typeParam T - Expected type of the parsed JSON records
+   * @param n - Number of records to sample
+   * @param options - Optional seed for reproducible sampling
+   * @returns Array of randomly sampled records
+   */
   async sample<T = unknown>(n: number, options: { seed?: number } = {}): Promise<T[]> {
     await this.ready();
     if (this.totalLines === 0 || n <= 0) {
@@ -537,6 +688,11 @@ export class JsonlIndex {
     return result;
   }
 
+  /**
+   * Rebuilds the index from scratch.
+   *
+   * Use this after the file has been modified in place.
+   */
   async rebuild(): Promise<void> {
     await this.ready();
     const stats = await this.getStats();
@@ -546,6 +702,15 @@ export class JsonlIndex {
     }
   }
 
+  /**
+   * Updates the index with newly appended lines.
+   *
+   * Use this after lines have been appended to the file.
+   * This is more efficient than rebuild() for append-only changes.
+   *
+   * @returns Number of new lines added
+   * @throws FileModifiedError if the file was truncated
+   */
   async update(): Promise<number> {
     await this.ready();
     if (!this.meta) {
@@ -632,6 +797,11 @@ export class JsonlIndex {
     return newLines.length;
   }
 
+  /**
+   * Saves the index to storage.
+   *
+   * Called automatically if autoSave is true (default).
+   */
   async save(): Promise<void> {
     await this.ready();
     if (this.meta) {
@@ -639,6 +809,12 @@ export class JsonlIndex {
     }
   }
 
+  /**
+   * Serializes the index to a JSON-compatible format.
+   *
+   * @returns Object containing meta and lines data
+   * @throws Error if index is not initialized
+   */
   toJSON(): { meta: IndexMeta; lines: [number, number][] } {
     if (!this.meta) {
       throw new Error("Index not initialized");
@@ -649,6 +825,23 @@ export class JsonlIndex {
     };
   }
 
+  /**
+   * Creates a batch processor for fault-tolerant iteration.
+   *
+   * @param jobId - Unique identifier for the processing job
+   * @param options - Optional progress storage and JSON parsing options
+   * @returns BatchProcessor instance for processing with checkpointing
+   *
+   * @example
+   * ```typescript
+   * await index.batchProcessor('my-job').run(async (batch) => {
+   *   for await (const [lineNum, record] of batch) {
+   *     await processRecord(record);
+   *     await batch.checkpoint();
+   *   }
+   * });
+   * ```
+   */
   batchProcessor(
     jobId: string,
     options: { progressStorage?: ProgressStorage; asJson?: boolean } = {},
@@ -656,6 +849,12 @@ export class JsonlIndex {
     return new BatchProcessor(this, jobId, options);
   }
 
+  /**
+   * Lists all processing jobs for this file.
+   *
+   * @param storage - Optional custom progress storage
+   * @returns Array of job info objects
+   */
   async listJobs(storage?: ProgressStorage): Promise<JobInfo[]> {
     const progressStorage = storage ?? this.progressStorage;
     const jobs = await progressStorage.loadJobs(this.progressPath);
@@ -667,6 +866,13 @@ export class JsonlIndex {
     return Array.from(jobs.values()).map((job) => this.jobToInfo(job, stats.size, stats.mtime));
   }
 
+  /**
+   * Gets information about a specific processing job.
+   *
+   * @param jobId - Job identifier
+   * @param storage - Optional custom progress storage
+   * @returns Job info or null if not found
+   */
   async getJob(jobId: string, storage?: ProgressStorage): Promise<JobInfo | null> {
     const progressStorage = storage ?? this.progressStorage;
     const jobs = await progressStorage.loadJobs(this.progressPath);
@@ -678,19 +884,47 @@ export class JsonlIndex {
     return this.jobToInfo(jobs.get(jobId) as JobProgress, stats.size, stats.mtime);
   }
 
+  /**
+   * Resets a processing job to start from the beginning.
+   *
+   * @param jobId - Job identifier
+   * @param storage - Optional custom progress storage
+   * @returns True if the job was reset, false if not found
+   */
   async resetJob(jobId: string, storage?: ProgressStorage): Promise<boolean> {
     const progressStorage = storage ?? this.progressStorage;
     return progressStorage.deleteJob(this.progressPath, jobId);
   }
 
+  /**
+   * Deletes a processing job's progress.
+   *
+   * @param jobId - Job identifier
+   * @param storage - Optional custom progress storage
+   * @returns True if the job was deleted, false if not found
+   */
   async deleteJob(jobId: string, storage?: ProgressStorage): Promise<boolean> {
     return this.resetJob(jobId, storage);
   }
 
+  /**
+   * Closes the index and releases resources.
+   *
+   * Note: JsonlIndex does not hold open file handles, so this is a no-op
+   * but provided for API consistency and future extensibility.
+   */
   async close(): Promise<void> {
     await this.ready();
   }
 
+  /**
+   * Async dispose method for TC39 explicit resource management.
+   *
+   * @example
+   * ```typescript
+   * await using index = new JsonlIndex('./data.jsonl');
+   * ```
+   */
   async [Symbol.asyncDispose](): Promise<void> {
     await this.close();
   }
