@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>jsonl-resumable Browser Demo</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 2rem;
+      background: #f5f5f5;
+    }
+
+    h1 {
+      color: #333;
+      margin-bottom: 0.5rem;
+    }
+
+    .subtitle {
+      color: #666;
+      margin-bottom: 2rem;
+    }
+
+    .card {
+      background: white;
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+
+    .card h2 {
+      margin-top: 0;
+      color: #444;
+      font-size: 1.2rem;
+    }
+
+    input[type="file"] {
+      display: block;
+      margin-bottom: 1rem;
+    }
+
+    button {
+      background: #4a90d9;
+      color: white;
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-right: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+
+    button:hover {
+      background: #357abd;
+    }
+
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+
+    .input-group {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+      align-items: center;
+    }
+
+    .input-group label {
+      min-width: 100px;
+    }
+
+    .input-group input[type="number"] {
+      width: 100px;
+      padding: 0.4rem;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+
+    #stats {
+      background: #f8f9fa;
+      padding: 1rem;
+      border-radius: 4px;
+      font-family: monospace;
+      white-space: pre-wrap;
+    }
+
+    #output {
+      background: #1e1e1e;
+      color: #d4d4d4;
+      padding: 1rem;
+      border-radius: 4px;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 0.85rem;
+      overflow-x: auto;
+      max-height: 400px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .log-entry {
+      margin-bottom: 0.25rem;
+    }
+
+    .log-entry.success {
+      color: #4ec9b0;
+    }
+
+    .log-entry.error {
+      color: #f14c4c;
+    }
+
+    .log-entry.highlight {
+      color: #9cdcfe;
+    }
+  </style>
+</head>
+<body>
+  <h1>jsonl-resumable</h1>
+  <p class="subtitle">O(1) random access for JSONL files in the browser</p>
+
+  <div class="card">
+    <h2>1. Select a JSONL File</h2>
+    <input type="file" id="fileInput" accept=".jsonl,.ndjson,.json">
+    <div id="stats">No file loaded</div>
+  </div>
+
+  <div class="card">
+    <h2>2. Random Access</h2>
+    <div class="input-group">
+      <label>Line number:</label>
+      <input type="number" id="lineNumber" value="0" min="0">
+      <button id="readLineBtn" disabled>Read Line</button>
+      <button id="readJsonBtn" disabled>Read JSON</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>3. Sampling</h2>
+    <div class="input-group">
+      <label>Sample size:</label>
+      <input type="number" id="sampleSize" value="5" min="1">
+      <label>Seed:</label>
+      <input type="number" id="sampleSeed" value="42">
+      <button id="sampleBtn" disabled>Sample</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>4. Iteration</h2>
+    <div class="input-group">
+      <label>Start line:</label>
+      <input type="number" id="iterStart" value="0" min="0">
+      <label>Limit:</label>
+      <input type="number" id="iterLimit" value="10" min="1">
+      <button id="iterBtn" disabled>Iterate</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Output</h2>
+    <div id="output">Select a file to begin...</div>
+  </div>
+
+  <script type="module">
+    // Import from the built browser module
+    // In production, this would be: import { JsonlIndex } from 'jsonl-resumable/browser';
+    import { JsonlIndex } from '../dist/browser/index.js';
+
+    let index = null;
+
+    const fileInput = document.getElementById('fileInput');
+    const stats = document.getElementById('stats');
+    const output = document.getElementById('output');
+    const readLineBtn = document.getElementById('readLineBtn');
+    const readJsonBtn = document.getElementById('readJsonBtn');
+    const sampleBtn = document.getElementById('sampleBtn');
+    const iterBtn = document.getElementById('iterBtn');
+
+    const buttons = [readLineBtn, readJsonBtn, sampleBtn, iterBtn];
+
+    function setButtonsEnabled(enabled) {
+      buttons.forEach(btn => btn.disabled = !enabled);
+    }
+
+    function log(message, type = '') {
+      const timestamp = new Date().toLocaleTimeString();
+
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      if (type) entry.classList.add(type);
+
+      // Use textContent to safely escape any HTML in the message
+      entry.textContent = `[${timestamp}] ${message}`;
+
+      output.appendChild(entry);
+      output.scrollTop = output.scrollHeight;
+    }
+
+    function clearOutput() {
+      output.textContent = '';
+    }
+
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      clearOutput();
+      log(`Loading file: ${file.name} (${formatSize(file.size)})...`);
+
+      try {
+        const startTime = performance.now();
+        index = new JsonlIndex(file);
+
+        // Wait for async initialization
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        const elapsed = (performance.now() - startTime).toFixed(2);
+
+        stats.textContent = `File: ${file.name}
+Size: ${formatSize(file.size)}
+Lines: ${index.totalLines.toLocaleString()}
+Index built in: ${elapsed}ms`;
+
+        log(`Index built successfully in ${elapsed}ms`, 'success');
+        log(`Total lines: ${index.totalLines.toLocaleString()}`, 'highlight');
+        setButtonsEnabled(true);
+      } catch (error) {
+        log(`Error loading file: ${error.message}`, 'error');
+        setButtonsEnabled(false);
+      }
+    });
+
+    readLineBtn.addEventListener('click', async () => {
+      const lineNum = Number.parseInt(document.getElementById('lineNumber').value, 10);
+      log(`Reading line ${lineNum}...`);
+
+      try {
+        const startTime = performance.now();
+        const line = await index.readLine(lineNum);
+        const elapsed = (performance.now() - startTime).toFixed(2);
+
+        log(`Line ${lineNum} (${elapsed}ms):`, 'highlight');
+        log(line);
+      } catch (error) {
+        log(`Error: ${error.message}`, 'error');
+      }
+    });
+
+    readJsonBtn.addEventListener('click', async () => {
+      const lineNum = Number.parseInt(document.getElementById('lineNumber').value, 10);
+      log(`Reading JSON from line ${lineNum}...`);
+
+      try {
+        const startTime = performance.now();
+        const data = await index.readJson(lineNum);
+        const elapsed = (performance.now() - startTime).toFixed(2);
+
+        log(`Line ${lineNum} as JSON (${elapsed}ms):`, 'highlight');
+        log(JSON.stringify(data, null, 2));
+      } catch (error) {
+        log(`Error: ${error.message}`, 'error');
+      }
+    });
+
+    sampleBtn.addEventListener('click', async () => {
+      const n = Number.parseInt(document.getElementById('sampleSize').value, 10);
+      const seed = Number.parseInt(document.getElementById('sampleSeed').value, 10);
+      log(`Sampling ${n} records with seed ${seed}...`);
+
+      try {
+        const startTime = performance.now();
+        const samples = await index.sample(n, { seed });
+        const elapsed = (performance.now() - startTime).toFixed(2);
+
+        log(`Sampled ${samples.length} records (${elapsed}ms):`, 'highlight');
+        samples.forEach((record, i) => {
+          log(`[${i}] ${JSON.stringify(record)}`);
+        });
+      } catch (error) {
+        log(`Error: ${error.message}`, 'error');
+      }
+    });
+
+    iterBtn.addEventListener('click', async () => {
+      const start = Number.parseInt(document.getElementById('iterStart').value, 10);
+      const limit = Number.parseInt(document.getElementById('iterLimit').value, 10);
+      log(`Iterating from line ${start}, limit ${limit}...`);
+
+      try {
+        const startTime = performance.now();
+        let count = 0;
+
+        for await (const line of index.asyncIter({ start, limit })) {
+          log(`[${start + count}] ${line}`);
+          count++;
+        }
+
+        const elapsed = (performance.now() - startTime).toFixed(2);
+        log(`Iterated ${count} lines (${elapsed}ms)`, 'success');
+      } catch (error) {
+        log(`Error: ${error.message}`, 'error');
+      }
+    });
+
+    function formatSize(bytes) {
+      const units = ['B', 'KB', 'MB', 'GB'];
+      let size = bytes;
+      for (const unit of units) {
+        if (size < 1024) return `${size.toFixed(1)} ${unit}`;
+        size /= 1024;
+      }
+      return `${size.toFixed(1)} TB`;
+    }
+  </script>
+</body>
+</html>
